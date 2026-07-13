@@ -36,6 +36,7 @@ export class PDFManager {
     this.state.setCurrentPage(1);
     await this.renderAllPages();
     await this.renderThumbnails();
+    this.state.notify('pdfLoaded');
   }
 
   async renderAllPages() {

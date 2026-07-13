@@ -37,10 +37,14 @@ class AppController {
 
   subscribeState() {
     this.state.subscribe((event, payload) => {
-      if (event === 'zoomChanged') {
+      if (event === 'pdfLoaded') {
+        this.renderAllOverlays();
+        this.setupScrollObserver();
+      } else if (event === 'zoomChanged') {
         document.getElementById('zoom-level-text').textContent = `${Math.round(payload.scale * 100)}%`;
         this.pdfManager.updateScale();
         this.renderAllOverlays();
+        this.setupScrollObserver();
       } else if (event === 'toolChanged') {
         this.updateToolUI(payload.tool);
       } else if (event === 'pageChanged') {
@@ -58,6 +62,30 @@ class AppController {
     });
   }
 
+  setupScrollObserver() {
+    if (this.pageObserver) {
+      this.pageObserver.disconnect();
+    }
+    const options = {
+      root: null,
+      threshold: 0.45,
+    };
+    this.pageObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const pageNum = parseInt(entry.target.dataset.page, 10);
+          if (pageNum && pageNum !== this.state.currentPage) {
+            this.state.setCurrentPage(pageNum);
+          }
+        }
+      });
+    }, options);
+
+    document.querySelectorAll('.pdf-page-wrapper').forEach((wrapper) => {
+      this.pageObserver.observe(wrapper);
+    });
+  }
+
   bindEvents() {
     // Toolbar buttons
     document.querySelectorAll('.tool-btn').forEach((btn) => {
@@ -70,9 +98,8 @@ class AppController {
             const dim = this.state.pageDimensions[pageIndex] || { width: 595.28, height: 841.89 };
             const width = 180;
             const height = 65;
-            // Place signature directly on the signature line area near bottom (approx y=685 pt on A4)
-            const x = 70;
-            const y = dim.height - 185;
+            const x = Math.max(20, (dim.width - width) / 2);
+            const y = Math.max(20, dim.height / 2 - 32);
 
             const newSig = {
               id: `el_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
@@ -88,7 +115,12 @@ class AppController {
             this.selectedElementId = newSig.id;
             this.selectedPageIndex = pageIndex;
             this.state.setActiveTool('select');
-            this.showToast('Signature placed onto document! Drag to move or resize.', 'success');
+
+            const pageWrapper = document.querySelector(`.pdf-page-wrapper[data-page="${this.state.currentPage}"]`);
+            if (pageWrapper) {
+              pageWrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            this.showToast(`Signature placed on Page ${this.state.currentPage}! Drag to move or resize.`, 'success');
           });
         }
       });
@@ -376,7 +408,11 @@ class AppController {
       e.stopPropagation();
       this.selectedElementId = el.id;
       this.selectedPageIndex = pageIndex;
-      this.renderAllOverlays();
+
+      document.querySelectorAll('.overlay-element.selected').forEach((domEl) => {
+        domEl.classList.remove('selected');
+      });
+      elDiv.classList.add('selected');
       this.updatePlacedElementsSidebar();
 
       if (e.target.classList.contains('resize-handle')) {
@@ -384,64 +420,141 @@ class AppController {
         return;
       }
 
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const initialX = el.x;
-      const initialY = el.y;
+      elDiv.setPointerCapture(e.pointerId);
+
+      let currentPageIndex = pageIndex;
+      let startX = e.clientX;
+      let startY = e.clientY;
+      let initialX = el.x;
+      let initialY = el.y;
+
+      let rafId = null;
+      let targetX = initialX;
+      let targetY = initialY;
 
       const onPointerMove = (moveE) => {
+        const wrappers = document.querySelectorAll('.pdf-page-wrapper');
+        wrappers.forEach((wrapper) => {
+          const rect = wrapper.getBoundingClientRect();
+          if (
+            moveE.clientX >= rect.left &&
+            moveE.clientX <= rect.right &&
+            moveE.clientY >= rect.top &&
+            moveE.clientY <= rect.bottom
+          ) {
+            const hoveredPageIndex = parseInt(wrapper.dataset.page, 10) - 1;
+            if (!isNaN(hoveredPageIndex) && hoveredPageIndex !== currentPageIndex) {
+              const newOverlay = wrapper.querySelector('.pdf-page-overlay');
+              if (newOverlay) {
+                newOverlay.appendChild(elDiv);
+                this.state.pageElements[currentPageIndex] = (this.state.pageElements[currentPageIndex] || []).filter(
+                  (item) => item.id !== el.id
+                );
+                if (!this.state.pageElements[hoveredPageIndex]) {
+                  this.state.pageElements[hoveredPageIndex] = [];
+                }
+                this.state.pageElements[hoveredPageIndex].push(el);
+
+                currentPageIndex = hoveredPageIndex;
+                this.selectedPageIndex = hoveredPageIndex;
+                this.state.setCurrentPage(hoveredPageIndex + 1);
+
+                startX = moveE.clientX;
+                startY = moveE.clientY;
+                initialX = (moveE.clientX - rect.left) / this.state.scale - el.width / 2;
+                initialY = (moveE.clientY - rect.top) / this.state.scale - el.height / 2;
+                targetX = initialX;
+                targetY = initialY;
+                el.x = targetX;
+                el.y = targetY;
+                this.updatePlacedElementsSidebar();
+              }
+            }
+          }
+        });
+
         const deltaX = (moveE.clientX - startX) / this.state.scale;
         const deltaY = (moveE.clientY - startY) / this.state.scale;
-        el.x = initialX + deltaX;
-        el.y = initialY + deltaY;
+        targetX = initialX + deltaX;
+        targetY = initialY + deltaY;
 
-        elDiv.style.left = `${el.x * this.state.scale}px`;
-        elDiv.style.top = `${el.y * this.state.scale}px`;
+        if (!rafId) {
+          rafId = requestAnimationFrame(() => {
+            elDiv.style.left = `${targetX * this.state.scale}px`;
+            elDiv.style.top = `${targetY * this.state.scale}px`;
+            rafId = null;
+          });
+        }
       };
 
       const onPointerUp = () => {
-        window.removeEventListener('pointermove', onPointerMove);
-        window.removeEventListener('pointerup', onPointerUp);
-        this.state.updateElement(pageIndex, el.id, { x: el.x, y: el.y });
+        if (rafId) cancelAnimationFrame(rafId);
+        try { elDiv.releasePointerCapture(e.pointerId); } catch (_) {}
+        elDiv.removeEventListener('pointermove', onPointerMove);
+        elDiv.removeEventListener('pointerup', onPointerUp);
+        elDiv.removeEventListener('pointercancel', onPointerUp);
+
+        el.x = targetX;
+        el.y = targetY;
+        this.state.updateElement(currentPageIndex, el.id, { x: el.x, y: el.y });
       };
 
-      window.addEventListener('pointermove', onPointerMove);
-      window.addEventListener('pointerup', onPointerUp);
+      elDiv.addEventListener('pointermove', onPointerMove);
+      elDiv.addEventListener('pointerup', onPointerUp);
+      elDiv.addEventListener('pointercancel', onPointerUp);
     });
   }
 
   handleResize(e, elDiv, el, pageIndex) {
+    elDiv.setPointerCapture(e.pointerId);
+
     const startX = e.clientX;
     const startY = e.clientY;
     const initialWidth = el.width;
     const initialHeight = el.height;
 
+    let rafId = null;
+    let targetW = initialWidth;
+    let targetH = initialHeight;
+
     const onPointerMove = (moveE) => {
       const deltaX = (moveE.clientX - startX) / this.state.scale;
       const deltaY = (moveE.clientY - startY) / this.state.scale;
-      const newW = Math.max(30, initialWidth + deltaX);
-      const newH = Math.max(15, initialHeight + deltaY);
+      targetW = Math.max(30, initialWidth + deltaX);
+      targetH = Math.max(15, initialHeight + deltaY);
 
-      el.width = newW;
-      el.height = newH;
-      elDiv.style.width = `${newW * this.state.scale}px`;
-      elDiv.style.height = `${newH * this.state.scale}px`;
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          elDiv.style.width = `${targetW * this.state.scale}px`;
+          elDiv.style.height = `${targetH * this.state.scale}px`;
+          rafId = null;
+        });
+      }
     };
 
     const onPointerUp = () => {
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
+      if (rafId) cancelAnimationFrame(rafId);
+      try { elDiv.releasePointerCapture(e.pointerId); } catch (_) {}
+      elDiv.removeEventListener('pointermove', onPointerMove);
+      elDiv.removeEventListener('pointerup', onPointerUp);
+      elDiv.removeEventListener('pointercancel', onPointerUp);
+
+      el.width = targetW;
+      el.height = targetH;
       this.state.updateElement(pageIndex, el.id, { width: el.width, height: el.height });
     };
 
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', onPointerUp);
+    elDiv.addEventListener('pointermove', onPointerMove);
+    elDiv.addEventListener('pointerup', onPointerUp);
+    elDiv.addEventListener('pointercancel', onPointerUp);
   }
 
   deselectElement() {
     if (this.selectedElementId) {
       this.selectedElementId = null;
-      this.renderAllOverlays();
+      document.querySelectorAll('.overlay-element.selected').forEach((domEl) => {
+        domEl.classList.remove('selected');
+      });
       this.updatePlacedElementsSidebar();
     }
   }
