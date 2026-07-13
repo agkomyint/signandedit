@@ -17,8 +17,9 @@ export class PDFManager {
   }
 
   async loadPDF(pdfBytes, fileName = 'Document.pdf') {
-    this.state.pdfBytes = pdfBytes;
-    const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+    this.state.pdfBytes = new Uint8Array(pdfBytes);
+    const workerBytes = new Uint8Array(pdfBytes);
+    const loadingTask = pdfjsLib.getDocument({ data: workerBytes });
     const pdf = await loadingTask.promise;
     this.state.pdfjsDoc = pdf;
     this.state.pageCount = pdf.numPages;
@@ -131,6 +132,7 @@ export class PDFManager {
   }
 
   hexToRgb(hex) {
+    if (!hex) return rgb(0.06, 0.09, 0.16);
     const cleanHex = hex.replace('#', '');
     const bigint = parseInt(cleanHex, 16);
     const r = (bigint >> 16) & 255;
@@ -139,12 +141,34 @@ export class PDFManager {
     return rgb(r / 255, g / 255, b / 255);
   }
 
+  dataUrlToUint8Array(dataUrl) {
+    const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+    const binaryStr = atob(base64);
+    const len = binaryStr.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  sanitizeWinAnsiText(text) {
+    if (!text) return '';
+    return text
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/—/g, '--')
+      .replace(/–/g, '-')
+      .replace(/[^\x20-\x7E]/g, ''); // Keep safe ASCII printable range
+  }
+
   async exportSignedPDF() {
     if (!this.state.pdfBytes) {
       throw new Error('No PDF document loaded');
     }
 
-    const pdfDoc = await PDFDocument.load(this.state.pdfBytes);
+    const sourceBytes = new Uint8Array(this.state.pdfBytes);
+    const pdfDoc = await PDFDocument.load(sourceBytes);
     const helveticaFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     const regularFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
@@ -156,13 +180,14 @@ export class PDFManager {
       const elements = this.state.getElementsForPage(pageIndex);
 
       for (const el of elements) {
-        if (el.type === 'signature') {
-          try {
+        try {
+          if (el.type === 'signature') {
+            const imageBytes = this.dataUrlToUint8Array(el.content);
             let embeddedImage;
             if (el.content.startsWith('data:image/jpeg') || el.content.startsWith('data:image/jpg')) {
-              embeddedImage = await pdfDoc.embedJpg(el.content);
+              embeddedImage = await pdfDoc.embedJpg(imageBytes);
             } else {
-              embeddedImage = await pdfDoc.embedPng(el.content);
+              embeddedImage = await pdfDoc.embedPng(imageBytes);
             }
             page.drawImage(embeddedImage, {
               x: el.x,
@@ -170,32 +195,79 @@ export class PDFManager {
               width: el.width,
               height: el.height,
             });
-          } catch (err) {
-            console.error('Error embedding signature image:', err);
+          } else if (el.type === 'text' || el.type === 'date') {
+            const textColor = this.hexToRgb(el.color || '#0f172a');
+            const lines = (el.content || '').split('\n');
+            let currentY = height - el.y - (el.fontSize || 14);
+            for (const line of lines) {
+              const safeLine = this.sanitizeWinAnsiText(line);
+              if (safeLine) {
+                page.drawText(safeLine, {
+                  x: el.x,
+                  y: currentY,
+                  size: el.fontSize || 14,
+                  font: el.bold ? helveticaFont : regularFont,
+                  color: textColor,
+                });
+              }
+              currentY -= (el.fontSize || 14) * 1.25;
+            }
+          } else if (el.type === 'stamp') {
+            const boxSize = el.width || 24;
+            const pdfY = height - el.y - boxSize;
+
+            if (el.content === '☑' || el.color === '#10b981') {
+              // Draw vector checkmark box
+              page.drawRectangle({
+                x: el.x,
+                y: pdfY,
+                width: boxSize,
+                height: boxSize,
+                borderColor: rgb(0.06, 0.72, 0.5),
+                borderWidth: 1.8,
+                color: rgb(0.92, 0.99, 0.95),
+              });
+              // Checkmark strokes
+              page.drawLine({
+                start: { x: el.x + boxSize * 0.22, y: pdfY + boxSize * 0.48 },
+                end: { x: el.x + boxSize * 0.42, y: pdfY + boxSize * 0.25 },
+                thickness: 2.2,
+                color: rgb(0.06, 0.72, 0.5),
+              });
+              page.drawLine({
+                start: { x: el.x + boxSize * 0.42, y: pdfY + boxSize * 0.25 },
+                end: { x: el.x + boxSize * 0.78, y: pdfY + boxSize * 0.75 },
+                thickness: 2.2,
+                color: rgb(0.06, 0.72, 0.5),
+              });
+            } else {
+              // Draw vector cross X box
+              page.drawRectangle({
+                x: el.x,
+                y: pdfY,
+                width: boxSize,
+                height: boxSize,
+                borderColor: rgb(0.93, 0.26, 0.26),
+                borderWidth: 1.8,
+                color: rgb(0.99, 0.94, 0.94),
+              });
+              // X strokes
+              page.drawLine({
+                start: { x: el.x + boxSize * 0.25, y: pdfY + boxSize * 0.75 },
+                end: { x: el.x + boxSize * 0.75, y: pdfY + boxSize * 0.25 },
+                thickness: 2.2,
+                color: rgb(0.93, 0.26, 0.26),
+              });
+              page.drawLine({
+                start: { x: el.x + boxSize * 0.25, y: pdfY + boxSize * 0.25 },
+                end: { x: el.x + boxSize * 0.75, y: pdfY + boxSize * 0.75 },
+                thickness: 2.2,
+                color: rgb(0.93, 0.26, 0.26),
+              });
+            }
           }
-        } else if (el.type === 'text' || el.type === 'date') {
-          const textColor = this.hexToRgb(el.color || '#0f172a');
-          const lines = (el.content || '').split('\n');
-          let currentY = height - el.y - el.fontSize;
-          for (const line of lines) {
-            page.drawText(line, {
-              x: el.x,
-              y: currentY,
-              size: el.fontSize || 14,
-              font: el.bold ? helveticaFont : regularFont,
-              color: textColor,
-            });
-            currentY -= (el.fontSize || 14) * 1.2;
-          }
-        } else if (el.type === 'stamp') {
-          const textColor = this.hexToRgb(el.color || '#0f172a');
-          page.drawText(el.content, {
-            x: el.x,
-            y: height - el.y - el.fontSize,
-            size: el.fontSize || 18,
-            font: helveticaFont,
-            color: textColor,
-          });
+        } catch (elErr) {
+          console.error(`Error embedding element on page ${pageIndex + 1}:`, elErr, el);
         }
       }
     }
