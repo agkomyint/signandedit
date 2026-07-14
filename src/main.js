@@ -1,13 +1,11 @@
 import './style.css';
 import { EditorState } from './editorState.js';
-import { PDFManager } from './pdfManager.js';
-import { SignaturePadModal } from './signaturePad.js';
-import { generateSamplePDF } from './samplePdf.js';
 
 class AppController {
   constructor() {
     this.state = new EditorState();
-    this.pdfManager = new PDFManager(this.state);
+    this.pdfManager = null;
+    this.SignaturePadModal = null;
     this.selectedElementId = null;
     this.selectedPageIndex = null;
 
@@ -16,6 +14,18 @@ class AppController {
 
   async init() {
     this.fitDocumentToMobile();
+
+    this.setLoadingState('Loading the secure PDF tools…', 28);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const [{ PDFManager }, { SignaturePadModal }, { generateSamplePDF }] = await Promise.all([
+      import('./pdfManager.js'),
+      import('./signaturePad.js'),
+      import('./samplePdf.js'),
+    ]);
+
+    this.pdfManager = new PDFManager(this.state);
+    this.SignaturePadModal = SignaturePadModal;
 
     this.pdfManager.setContainers(
       document.getElementById('pdf-container'),
@@ -32,15 +42,35 @@ class AppController {
     });
 
     try {
-      this.showToast('Loading document...', 'info');
+      this.setLoadingState('Creating your sample agreement…', 62);
       const sampleBytes = await generateSamplePDF();
+      this.setLoadingState('Rendering the document…', 82);
       await this.pdfManager.loadPDF(sampleBytes, 'Sample_Agreement_2026.pdf');
       this.updateDocMetadata('Sample_Agreement_2026.pdf');
+      this.setLoadingState('Ready to sign', 100);
+      this.finishLoading();
       this.showToast('Document loaded and ready to sign!', 'success');
     } catch (err) {
       console.error('Failed to load sample PDF:', err);
+      this.setLoadingState('Could not open the document. Please refresh.', 100, true);
       this.showToast('Error loading sample PDF', 'error');
     }
+  }
+
+  setLoadingState(message, progress, isError = false) {
+    const loader = document.getElementById('app-loader');
+    const status = document.getElementById('loader-status');
+    const bar = document.getElementById('loader-progress-bar');
+    if (status) status.textContent = message;
+    if (bar) bar.style.width = `${progress}%`;
+    if (loader) loader.classList.toggle('has-error', isError);
+  }
+
+  finishLoading() {
+    const loader = document.getElementById('app-loader');
+    if (!loader) return;
+    loader.classList.add('is-complete');
+    window.setTimeout(() => loader.remove(), 380);
   }
 
   fitDocumentToMobile(onlyIfLoaded = false) {
@@ -263,7 +293,7 @@ class AppController {
   }
 
   showSignatureModal(onSaveCallback) {
-    const modal = new SignaturePadModal({
+    const modal = new this.SignaturePadModal({
       onSave: onSaveCallback,
     });
     modal.open();
