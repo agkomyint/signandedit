@@ -15,6 +15,8 @@ class AppController {
   }
 
   async init() {
+    this.fitDocumentToMobile();
+
     this.pdfManager.setContainers(
       document.getElementById('pdf-container'),
       document.getElementById('pdf-thumbnails')
@@ -22,6 +24,12 @@ class AppController {
 
     this.bindEvents();
     this.subscribeState();
+
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => this.fitDocumentToMobile(true), 180);
+    });
 
     try {
       this.showToast('Loading document...', 'info');
@@ -32,6 +40,23 @@ class AppController {
     } catch (err) {
       console.error('Failed to load sample PDF:', err);
       this.showToast('Error loading sample PDF', 'error');
+    }
+  }
+
+  fitDocumentToMobile(onlyIfLoaded = false) {
+    if (!window.matchMedia('(max-width: 700px)').matches) return;
+
+    const pageWidth = this.state.pageDimensions[0]?.width || 595.28;
+    const availableWidth = Math.max(280, window.innerWidth - 24);
+    const fittedScale = Math.min(1, Math.max(0.5, availableWidth / pageWidth));
+
+    if (onlyIfLoaded && !this.state.pdfjsDoc) return;
+    if (Math.abs(this.state.scale - fittedScale) < 0.02) return;
+
+    if (this.state.pdfjsDoc) {
+      this.state.setZoom(fittedScale);
+    } else {
+      this.state.scale = fittedScale;
     }
   }
 
